@@ -55,13 +55,13 @@ class Profile {
   var localPort: Int = 1080
 
   @DatabaseField
-  var remotePort: Int = 8338
+  var remotePort: Int = 8388
 
   @DatabaseField
   var password: String = ""
 
   @DatabaseField
-  var method: String = "rc4"
+  var method: String = "aes-256-cfb"
 
   @DatabaseField
   var route: String = "all"
@@ -83,4 +83,16 @@ class Profile {
 
   @DatabaseField(dataType = DataType.LONG_STRING)
   var individual: String = ""
+
+  @DatabaseField
+  var tx: Long = 0
+
+  @DatabaseField
+  var rx: Long = 0
+
+  @DatabaseField
+  val date: java.util.Date = new java.util.Date()
+
+  @DatabaseField
+  var userOrder: Long = _
 }

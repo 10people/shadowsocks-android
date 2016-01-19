@@ -36,66 +36,38 @@
  *                              HERE BE DRAGONS
  *
  */
+package com.github.shadowsocks.helper
 
-package com.github.shadowsocks.utils
+import android.content.{Context, Intent}
+import android.os.Bundle
+import com.github.shadowsocks.{R, ShadowsocksApplication}
+import com.twofortyfouram.locale.api.{Intent => ApiIntent}
 
-import java.util
+object TaskerSettings {
+  private val KEY_SWITCH_ON = "switch_on"
+  private val KEY_PROFILE_ID = "profile_id"
 
-import eu.chainfire.libsuperuser.Shell
-import eu.chainfire.libsuperuser.Shell.{Builder, SU}
+  def fromIntent(intent: Intent) = new TaskerSettings(if (intent.hasExtra(ApiIntent.EXTRA_BUNDLE))
+    intent.getBundleExtra(ApiIntent.EXTRA_BUNDLE) else Bundle.EMPTY)
 
-object Console {
-
-  private def openShell(): Shell.Interactive = {
-    val builder = new Builder()
-    builder
-      .useSH()
-      .setWatchdogTimeout(10)
-      .open()
-  }
-
-  private def openRootShell(context: String): Shell.Interactive = {
-    val builder = new Builder()
-    builder
-      .setShell(SU.shell(0, context))
-      .setWantSTDERR(true)
-      .setWatchdogTimeout(10)
-      .open()
-  }
-
-  def runCommand(command: String) {
-    runCommand(Array(command))
-  }
-
-  def runCommand(commands: Array[String]) {
-    val shell = openShell()
-    shell.addCommand(commands, 0, ((commandCode: Int, exitCode: Int, output: util.List[String]) =>
-      if (exitCode < 0) shell.close()): Shell.OnCommandResultListener)
-    shell.waitForIdle()
-    shell.close()
-  }
-
-  def runRootCommand(commands: String*): String = runRootCommand(commands.toArray)
-  def runRootCommand(commands: Array[String]): String = {
-    val shell = openRootShell("u:r:init_shell:s0")
-    val sb = new StringBuilder
-    shell.addCommand(commands, 0, ((_, exitCode, output) => {
-      if (exitCode < 0) {
-        shell.close()
-      } else {
-        import scala.collection.JavaConversions._
-        output.foreach(line => sb.append(line).append('\n'))
-      }
-    }): Shell.OnCommandResultListener)
-    if (shell.waitForIdle()) {
-      shell.close()
-      sb.toString()
-    }
-    else {
-      shell.close()
-      null
-    }
-  }
-
-  def isRoot: Boolean = SU.available()
+  def fromBundle(bundle: Bundle) = new TaskerSettings(bundle)
 }
+
+class TaskerSettings(bundle: Bundle) {
+  import TaskerSettings._
+
+  var switchOn = bundle.getBoolean(KEY_SWITCH_ON, true)
+  var profileId = bundle.getInt(KEY_PROFILE_ID, -1)
+
+  def toIntent(context: Context) = {
+    val bundle = new Bundle()
+    if (!switchOn) bundle.putBoolean(KEY_SWITCH_ON, false)
+    if (profileId >= 0) bundle.putInt(KEY_PROFILE_ID, profileId)
+    new Intent().putExtra(ApiIntent.EXTRA_BUNDLE, bundle).putExtra(ApiIntent.EXTRA_STRING_BLURB,
+      ShadowsocksApplication.profileManager.getProfile(profileId) match {
+        case Some(p) => context.getString(if (switchOn) R.string.start_service else R.string.stop_service, p.name)
+        case None => context.getString(if (switchOn) R.string.start_service_default else R.string.stop)
+      })
+  }
+}
+

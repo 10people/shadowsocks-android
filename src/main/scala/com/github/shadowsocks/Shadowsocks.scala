@@ -49,32 +49,27 @@ import android.content.res.AssetManager
 import android.graphics.Typeface
 import android.net.VpnService
 import android.os._
-import android.preference.{Preference, SwitchPreference}
 import android.support.design.widget.{FloatingActionButton, Snackbar}
 import android.support.v4.content.ContextCompat
 import android.support.v7.app.AppCompatActivity
 import android.support.v7.widget.Toolbar
 import android.util.Log
-import android.view.{ViewGroup, View, ViewParent}
+import android.view.{View, ViewGroup, ViewParent}
 import android.widget._
 import com.github.jorgecastilloprz.FABProgressCircle
-import com.github.shadowsocks.aidl.{IShadowsocksService, IShadowsocksServiceCallback}
+import com.github.shadowsocks.aidl.IShadowsocksServiceCallback
 import com.github.shadowsocks.database._
-import com.github.shadowsocks.preferences.{DropDownPreference, NumberPickerPreference, PasswordEditTextPreference, SummaryEditTextPreference}
 import com.github.shadowsocks.utils._
 import com.google.android.gms.ads.{AdRequest, AdSize, AdView}
 
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
 
 object Typefaces {
   def get(c: Context, assetPath: String): Typeface = {
     cache synchronized {
       if (!cache.containsKey(assetPath)) {
         try {
-          val t: Typeface = Typeface.createFromAsset(c.getAssets, assetPath)
-          cache.put(assetPath, t)
+          cache.put(assetPath, Typeface.createFromAsset(c.getAssets, assetPath))
         } catch {
           case e: Exception =>
             Log.e(TAG, "Could not get typeface '" + assetPath + "' because " + e.getMessage)
@@ -94,105 +89,121 @@ object Shadowsocks {
   // Constants
   val TAG = "Shadowsocks"
   val REQUEST_CONNECT = 1
-
-  val PREFS_NAME = "Shadowsocks"
-  val PROXY_PREFS = Array(Key.profileName, Key.proxy, Key.remotePort, Key.localPort, Key.sitekey, Key.encMethod,
-    Key.isAuth)
-  val FEATURE_PREFS = Array(Key.route, Key.isProxyApps, Key.isUdpDns, Key.isIpv6)
   val EXECUTABLES = Array(Executable.PDNSD, Executable.REDSOCKS, Executable.SS_TUNNEL, Executable.SS_LOCAL,
     Executable.TUN2SOCKS)
 
-  // Helper functions
-  def updateDropDownPreference(pref: Preference, value: String) {
-    pref.asInstanceOf[DropDownPreference].setValue(value)
-  }
-
-  def updatePasswordEditTextPreference(pref: Preference, value: String) {
-    pref.setSummary(value)
-    pref.asInstanceOf[PasswordEditTextPreference].setText(value)
-  }
-
-  def updateNumberPickerPreference(pref: Preference, value: Int): Unit = {
-    pref.asInstanceOf[NumberPickerPreference].setValue(value)
-  }
-
-  def updateSummaryEditTextPreference(pref: Preference, value: String) {
-    pref.setSummary(value)
-    pref.asInstanceOf[SummaryEditTextPreference].setText(value)
-  }
-
-  def updateSwitchPreference(pref: Preference, value: Boolean) {
-    pref.asInstanceOf[SwitchPreference].setChecked(value)
-  }
-
-  def updatePreference(pref: Preference, name: String, profile: Profile) {
-    name match {
-      case Key.profileName => updateSummaryEditTextPreference(pref, profile.name)
-      case Key.proxy => updateSummaryEditTextPreference(pref, profile.host)
-      case Key.remotePort => updateNumberPickerPreference(pref, profile.remotePort)
-      case Key.localPort => updateNumberPickerPreference(pref, profile.localPort)
-      case Key.sitekey => updatePasswordEditTextPreference(pref, profile.password)
-      case Key.encMethod => updateDropDownPreference(pref, profile.method)
-      case Key.route => updateDropDownPreference(pref, profile.route)
-      case Key.isProxyApps => updateSwitchPreference(pref, profile.proxyApps)
-      case Key.isUdpDns => updateSwitchPreference(pref, profile.udpdns)
-      case Key.isAuth => updateSwitchPreference(pref, profile.auth)
-      case Key.isIpv6 => updateSwitchPreference(pref, profile.ipv6)
-      case _ =>
-    }
-  }
 }
 
 class Shadowsocks
-  extends AppCompatActivity {
+  extends AppCompatActivity with ServiceBoundContext {
 
   // Variables
-  private var serviceStarted = false
+  var serviceStarted = false
   var fab: FloatingActionButton = _
   var fabProgressCircle: FABProgressCircle = _
   var progressDialog: ProgressDialog = _
   var progressTag = -1
-  var state = State.INIT
-  var prepared = false
+  var state = State.STOPPED
   var currentProfile = new Profile
   var vpnEnabled = -1
+  var trafficCache: String = _
+  var connectionTestResult: String = _
 
   // Services
   var currentServiceName = classOf[ShadowsocksNatService].getName
-  var bgService: IShadowsocksService = null
-  val callback = new IShadowsocksServiceCallback.Stub {
-    override def stateChanged(state: Int, msg: String) {
-      onStateChanged(state, msg)
+  private val callback = new IShadowsocksServiceCallback.Stub {
+    def stateChanged(s: Int, m: String) {
+      handler.post(() => if (state != s) {
+        s match {
+          case State.CONNECTING =>
+            fab.setBackgroundTintList(greyTint)
+            fab.setImageResource(R.drawable.ic_cloud_queue)
+            fab.setEnabled(false)
+            fabProgressCircle.show()
+            preferences.setEnabled(false)
+          case State.CONNECTED =>
+            fab.setBackgroundTintList(greenTint)
+            if (state == State.CONNECTING) {
+              fabProgressCircle.beginFinalAnimation()
+            } else {
+              fabProgressCircle.postDelayed(hideCircle, 1000)
+            }
+            fab.setEnabled(true)
+            changeSwitch(checked = true)
+            preferences.setEnabled(false)
+          case State.STOPPED =>
+            fab.setBackgroundTintList(greyTint)
+            fabProgressCircle.postDelayed(hideCircle, 1000)
+            fab.setEnabled(true)
+            changeSwitch(checked = false)
+            if (m != null) {
+              val snackbar = Snackbar.make(findViewById(android.R.id.content),
+                getString(R.string.vpn_error).formatLocal(Locale.ENGLISH, m), Snackbar.LENGTH_LONG)
+              if (m == getString(R.string.nat_no_root)) snackbar.setAction(R.string.switch_to_vpn,
+                (_ => preferences.natSwitch.setChecked(false)): View.OnClickListener)
+              snackbar.show
+            }
+            preferences.setEnabled(true)
+          case State.STOPPING =>
+            fab.setBackgroundTintList(greyTint)
+            fab.setImageResource(R.drawable.ic_cloud_queue)
+            fab.setEnabled(false)
+            if (state == State.CONNECTED) fabProgressCircle.show()  // ignore for stopped
+            preferences.setEnabled(false)
+        }
+        state = s
+      })
+    }
+    def trafficUpdated(txRate: Long, rxRate: Long, txTotal: Long, rxTotal: Long) {
+      trafficCache = getString(R.string.stat_summary).formatLocal(Locale.ENGLISH,
+        TrafficMonitor.formatTraffic(txRate), TrafficMonitor.formatTraffic(rxRate),
+        TrafficMonitor.formatTraffic(txTotal), TrafficMonitor.formatTraffic(rxTotal))
+      handler.post(updateTraffic)
     }
   }
-  val connection = new ServiceConnection {
-    override def onServiceConnected(name: ComponentName, service: IBinder) {
-      // Initialize the background service
-      bgService = IShadowsocksService.Stub.asInterface(service)
-      try {
-        bgService.registerCallback(callback)
-      } catch {
-        case ignored: RemoteException => // Nothing
-      }
-      // Update the UI
-      if (fab != null) fab.setEnabled(true)
-      stateUpdate()
 
-      if (!ShadowsocksApplication.settings.getBoolean(ShadowsocksApplication.getVersionName, false)) {
-        ShadowsocksApplication.settings.edit.putBoolean(ShadowsocksApplication.getVersionName, true).apply()
-        recovery()
-      }
+  def updateTraffic(): Unit = if (trafficCache == null) callback.trafficUpdated(0, 0, 0, 0) else {
+    if (connectionTestResult == null) connectionTestResult = getString(R.string.connection_test_pending)
+    if (preferences.natSwitch.isChecked) {
+      preferences.stat.setSummary(trafficCache)
+    } else {
+      preferences.stat.setSummary(connectionTestResult + "\n" + trafficCache)
     }
+  }
 
-    override def onServiceDisconnected(name: ComponentName) {
-      if (fab != null) fab.setEnabled(false)
+  def attachService: Unit = attachService(callback)
+
+  override def onServiceConnected() {
+    // Update the UI
+    if (fab != null) fab.setEnabled(true)
+    updateState()
+
+    if (!ShadowsocksApplication.settings.getBoolean(ShadowsocksApplication.getVersionName, false)) {
+      ShadowsocksApplication.settings.edit.putBoolean(ShadowsocksApplication.getVersionName, true).apply()
       try {
-        if (bgService != null) bgService.unregisterCallback(callback)
+        // Workaround that convert port(String) to port(Int)
+        val oldLocalPort = ShadowsocksApplication.settings.getString(Key.localPort, "")
+        val oldRemotePort = ShadowsocksApplication.settings.getString(Key.remotePort, "")
+
+        if (oldLocalPort != "") {
+          ShadowsocksApplication.settings.edit.putInt(Key.localPort, oldLocalPort.toInt).apply()
+        }
+        if (oldRemotePort != "") {
+          ShadowsocksApplication.settings.edit.putInt(Key.remotePort, oldRemotePort.toInt).apply()
+        }
       } catch {
-        case ignored: RemoteException => // Nothing
+        case ex: Exception => // Ignore
       }
-      bgService = null
+      val oldProxiedApps = ShadowsocksApplication.settings.getString(Key.proxied, "")
+      if (oldProxiedApps.contains('|')) ShadowsocksApplication.settings.edit
+        .putString(Key.proxied, DBHelper.updateProxiedApps(this, oldProxiedApps)).apply()
+
+      recovery()
     }
+  }
+
+  override def onServiceDisconnected() {
+    if (fab != null) fab.setEnabled(false)
   }
 
   private lazy val preferences =
@@ -276,10 +287,10 @@ class Shadowsocks
       cmd.append("chmod 666 %s%s-vpn.pid".formatLocal(Locale.ENGLISH, Path.BASE, task))
     }
 
-    if (!ShadowsocksApplication.isVpnEnabled) {
-      Console.runRootCommand(cmd.toArray)
-    } else {
+    if (ShadowsocksApplication.isVpnEnabled) {
       Console.runCommand(cmd.toArray)
+    } else {
+      Console.runRootCommand(cmd.toArray)
     }
 
     cmd.clear()
@@ -300,17 +311,10 @@ class Shadowsocks
       cmd.append("rm -f %s%s-vpn.pid".formatLocal(Locale.ENGLISH, Path.BASE, task))
       cmd.append("rm -f %s%s-vpn.conf".formatLocal(Locale.ENGLISH, Path.BASE, task))
     }
-    Console.runCommand(cmd.toArray)
-    if (!ShadowsocksApplication.isVpnEnabled) {
+    if (ShadowsocksApplication.isVpnEnabled) Console.runCommand(cmd.toArray) else {
       Console.runRootCommand(cmd.toArray)
       Console.runRootCommand(Utils.getIptables + " -t nat -F OUTPUT")
     }
-  }
-
-  def isTextEmpty(s: String, msg: String): Boolean = {
-    if (s != null && s.length > 0) return false
-    Snackbar.make(getWindow.getDecorView.findViewById(android.R.id.content), msg, Snackbar.LENGTH_LONG).show
-    true
   }
 
   def cancelStart() {
@@ -318,21 +322,16 @@ class Shadowsocks
     changeSwitch(checked = false)
   }
 
-  def isReady: Boolean = {
-    if (!checkText(Key.proxy)) return false
-    if (!checkText(Key.sitekey)) return false
-    if (bgService == null) return false
-    true
-  }
+  def isReady: Boolean = checkText(Key.proxy) && checkText(Key.sitekey) && bgService != null
 
   def prepareStartService() {
-    Future {
+    ThrowableFuture {
       if (ShadowsocksApplication.isVpnEnabled) {
         val intent = VpnService.prepare(this)
         if (intent != null) {
           startActivityForResult(intent, Shadowsocks.REQUEST_CONNECT)
         } else {
-          onActivityResult(Shadowsocks.REQUEST_CONNECT, Activity.RESULT_OK, null)
+          handler.post(() => onActivityResult(Shadowsocks.REQUEST_CONNECT, Activity.RESULT_OK, null))
         }
       } else {
         serviceStart()
@@ -351,7 +350,7 @@ class Shadowsocks
 
     super.onCreate(savedInstanceState)
     setContentView(R.layout.layout_main)
-    // Initialize action bar
+    // Initialize Toolbar
     val toolbar = findViewById(R.id.toolbar).asInstanceOf[Toolbar]
     toolbar.setTitle(getString(R.string.screen_name))
     toolbar.setTitleTextAppearance(toolbar.getContext, R.style.Toolbar_Logo)
@@ -382,41 +381,17 @@ class Shadowsocks
     })
 
     // Bind to the service
-    handler.post(() => {
-      attachService()
-    })
-  }
-
-  def attachService() {
-    if (bgService == null) {
-      val s = if (ShadowsocksApplication.isVpnEnabled) classOf[ShadowsocksVpnService]
-      else classOf[ShadowsocksNatService]
-      val intent = new Intent(this, s)
-      intent.setAction(Action.SERVICE)
-      bindService(intent, connection, Context.BIND_AUTO_CREATE)
-      startService(new Intent(this, s))
-    }
-  }
-
-  def deattachService() {
-    if (bgService != null) {
-      try {
-        bgService.unregisterCallback(callback)
-      } catch {
-        case ignored: RemoteException => // Nothing
-      }
-      bgService = null
-      unbindService(connection)
-    }
+    handler.post(() => attachService)
   }
 
   def reloadProfile() {
     currentProfile = ShadowsocksApplication.currentProfile match {
       case Some(profile) => profile // updated
       case None =>                  // removed
-        val profiles = ShadowsocksApplication.profileManager.getAllProfiles.getOrElse(List[Profile]())
-        if (profiles.isEmpty) ShadowsocksApplication.profileManager.createDefault()
-        else ShadowsocksApplication.switchProfile(profiles.head.id)
+        ShadowsocksApplication.profileManager.getFirstProfile match {
+          case Some(first) => ShadowsocksApplication.switchProfile(first.id)
+          case None => ShadowsocksApplication.profileManager.createDefault()
+        }
     }
 
     updatePreferenceScreen()
@@ -427,32 +402,43 @@ class Shadowsocks
   protected override def onPause() {
     super.onPause()
     ShadowsocksApplication.profileManager.save
-    prepared = false
   }
 
-  private def stateUpdate() {
+  private def hideCircle() {
+    try {
+      fabProgressCircle.hide()
+    } catch {
+      case _: java.lang.NullPointerException => // Ignore
+    }
+  }
+
+  private def updateState() {
     if (bgService != null) {
       bgService.getState match {
         case State.CONNECTING =>
           fab.setBackgroundTintList(greyTint)
+          serviceStarted = false
+          fab.setImageResource(R.drawable.ic_cloud_queue)
+          preferences.setEnabled(false)
           fabProgressCircle.show()
-          changeSwitch(checked = true)
-          setPreferenceEnabled(false)
         case State.CONNECTED =>
           fab.setBackgroundTintList(greenTint)
-          fabProgressCircle.hide()
-          changeSwitch(checked = true)
-          setPreferenceEnabled(false)
+          serviceStarted = true
+          fab.setImageResource(R.drawable.ic_cloud)
+          preferences.setEnabled(false)
+          fabProgressCircle.postDelayed(hideCircle, 100)
         case State.STOPPING =>
           fab.setBackgroundTintList(greyTint)
+          serviceStarted = false
+          fab.setImageResource(R.drawable.ic_cloud_queue)
+          preferences.setEnabled(false)
           fabProgressCircle.show()
-          changeSwitch(checked = false)
-          setPreferenceEnabled(false)
         case _ =>
           fab.setBackgroundTintList(greyTint)
-          fabProgressCircle.hide()
-          changeSwitch(checked = false)
-          setPreferenceEnabled(true)
+          serviceStarted = false
+          fab.setImageResource(R.drawable.ic_cloud_off)
+          preferences.setEnabled(true)
+          fabProgressCircle.postDelayed(hideCircle, 100)
       }
       state = bgService.getState
     }
@@ -460,75 +446,46 @@ class Shadowsocks
 
   protected override def onResume() {
     super.onResume()
-    stateUpdate()
     ConfigUtils.refresh(this)
 
     // Check if current profile changed
     if (ShadowsocksApplication.profileId != currentProfile.id) reloadProfile()
-  }
 
-  private def setPreferenceEnabled(enabled: Boolean) {
-    preferences.findPreference(Key.isNAT).setEnabled(enabled)
-    for (name <- Shadowsocks.PROXY_PREFS) {
-      val pref = preferences.findPreference(name)
-      if (pref != null) {
-        pref.setEnabled(enabled)
-      }
-    }
-    for (name <- Shadowsocks.FEATURE_PREFS) {
-      val pref = preferences.findPreference(name)
-      if (pref != null) {
-        if (name == Key.isProxyApps) {
-          pref.setEnabled(enabled && (Utils.isLollipopOrAbove || !ShadowsocksApplication.isVpnEnabled))
-        } else {
-          pref.setEnabled(enabled)
-        }
-      }
-    }
+    updateTraffic()
+    updateState()
   }
 
   private def updatePreferenceScreen() {
-    if (ShadowsocksApplication.proxy == "198.199.101.152" && adView == null) {
+    val profile = currentProfile
+    if (profile.host == "198.199.101.152") if (adView == null) {
       adView = new AdView(this)
       adView.setAdUnitId("ca-app-pub-9097031975646651/7760346322")
       adView.setAdSize(AdSize.SMART_BANNER)
       preferences.getView.asInstanceOf[ViewGroup].addView(adView, 0)
       adView.loadAd(new AdRequest.Builder().build())
-    }
+    } else adView.setVisibility(View.VISIBLE) else if (adView != null) adView.setVisibility(View.GONE)
 
-    val profile = currentProfile
-    for (name <- Shadowsocks.PROXY_PREFS) {
-      val pref = preferences.findPreference(name)
-      Shadowsocks.updatePreference(pref, name, profile)
-    }
-    for (name <- Shadowsocks.FEATURE_PREFS) {
-      val pref = preferences.findPreference(name)
-      Shadowsocks.updatePreference(pref, name, profile)
-    }
+    preferences.update(profile)
   }
 
+  override def onStart() {
+    super.onStart()
+    registerCallback
+  }
   override def onStop() {
     super.onStop()
+    unregisterCallback
     clearDialog()
   }
 
+  private var _isDestroyed: Boolean = _
+  override def isDestroyed = if (Build.VERSION.SDK_INT >= 17) super.isDestroyed else _isDestroyed
   override def onDestroy() {
     super.onDestroy()
+    _isDestroyed = true
     deattachService()
     new BackupManager(this).dataChanged()
     handler.removeCallbacksAndMessages(null)
-  }
-
-  def copyToSystem() {
-    val ab = new ArrayBuffer[String]
-    ab.append("mount -o rw,remount -t yaffs2 /dev/block/mtdblock3 /system")
-    for (executable <- Shadowsocks.EXECUTABLES) {
-      ab.append("cp %s%s /system/bin/".formatLocal(Locale.ENGLISH, Path.BASE, executable))
-      ab.append("chmod 755 /system/bin/" + executable)
-      ab.append("chown root:shell /system/bin/" + executable)
-    }
-    ab.append("mount -o ro,remount -t yaffs2 /dev/block/mtdblock3 /system")
-    Console.runRootCommand(ab.toArray)
   }
 
   def install() {
@@ -550,7 +507,7 @@ class Shadowsocks
   def recovery() {
     serviceStop()
     val h = showProgress(R.string.recovering)
-    Future {
+    ThrowableFuture {
       reset()
       h.sendEmptyMessage(0)
     }
@@ -558,15 +515,15 @@ class Shadowsocks
 
   def flushDnsCache() {
     val h = showProgress(R.string.flushing)
-    Future {
-      Utils.toggleAirplaneMode(getBaseContext)
+    ThrowableFuture {
+      if (!Utils.toggleAirplaneMode(getBaseContext)) h.post(() => Snackbar.make(findViewById(android.R.id.content),
+        R.string.flush_dnscache_no_root, Snackbar.LENGTH_LONG).show)
       h.sendEmptyMessage(0)
     }
   }
 
   override def onActivityResult(requestCode: Int, resultCode: Int, data: Intent) = resultCode match {
     case Activity.RESULT_OK =>
-      prepared = true
       serviceStart()
     case _ =>
       cancelStart()
@@ -579,7 +536,9 @@ class Shadowsocks
 
   def checkText(key: String): Boolean = {
     val text = ShadowsocksApplication.settings.getString(key, "")
-    !isTextEmpty(text, getString(R.string.proxy_empty))
+    if (text != null && text.length > 0) return true
+    Snackbar.make(findViewById(android.R.id.content), R.string.proxy_empty, Snackbar.LENGTH_LONG).show
+    false
   }
 
   /** Called when connect button is clicked. */
@@ -592,48 +551,10 @@ class Shadowsocks
   }
 
   def clearDialog() {
-    if (progressDialog != null) {
-      progressDialog.dismiss()
+    if (progressDialog != null && progressDialog.isShowing) {
+      if (!isDestroyed) progressDialog.dismiss()
       progressDialog = null
       progressTag = -1
     }
-  }
-
-  def onStateChanged(s: Int, m: String) {
-    handler.post(() => if (state != s) {
-      s match {
-        case State.CONNECTING =>
-          fab.setBackgroundTintList(greyTint)
-          fab.setImageResource(R.drawable.ic_cloud_queue)
-          fab.setEnabled(false)
-          fabProgressCircle.show()
-          setPreferenceEnabled(enabled = false)
-        case State.CONNECTED =>
-          fab.setBackgroundTintList(greenTint)
-          if (state == State.CONNECTING) {
-            fabProgressCircle.beginFinalAnimation()
-          } else {
-            handler.postDelayed(() => fabProgressCircle.hide(), 1000)
-          }
-          fab.setEnabled(true)
-          changeSwitch(checked = true)
-          setPreferenceEnabled(enabled = false)
-        case State.STOPPED =>
-          fab.setBackgroundTintList(greyTint)
-          handler.postDelayed(() => fabProgressCircle.hide(), 1000)
-          fab.setEnabled(true)
-          changeSwitch(checked = false)
-          if (m != null) Snackbar.make(getWindow.getDecorView.findViewById(android.R.id.content),
-            getString(R.string.vpn_error).formatLocal(Locale.ENGLISH, m), Snackbar.LENGTH_LONG).show
-          setPreferenceEnabled(enabled = true)
-        case State.STOPPING =>
-          fab.setBackgroundTintList(greyTint)
-          fab.setImageResource(R.drawable.ic_cloud_queue)
-          fab.setEnabled(false)
-          if (state == State.CONNECTED) fabProgressCircle.show()  // ignore for stopped
-          setPreferenceEnabled(enabled = false)
-      }
-      state = s
-    })
   }
 }

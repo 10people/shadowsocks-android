@@ -68,6 +68,7 @@ object Key {
   val profiles = "profiles"
   val isNAT = "isNAT"
   val route = "route"
+  val stat = "stat"
 
   val isRunning = "isRunning"
   val isAutoConnect = "isAutoConnect"
@@ -81,8 +82,8 @@ object Key {
   val proxy = "proxy"
   val sitekey = "sitekey"
   val encMethod = "encMethod"
-  val remotePort = "remotePort"
-  val localPort = "port"
+  val remotePort = "remotePortNum"
+  val localPort = "localPortNum"
 }
 
 object Scheme {
@@ -97,7 +98,6 @@ object Mode {
 }
 
 object State {
-  val INIT = 0
   val CONNECTING = 1
   val CONNECTED = 2
   val STOPPING = 3

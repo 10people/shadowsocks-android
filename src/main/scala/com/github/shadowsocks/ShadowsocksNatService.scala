@@ -40,27 +40,24 @@
 package com.github.shadowsocks
 
 import java.io.File
+import java.lang.Process
 import java.net.{Inet6Address, InetAddress}
 import java.util.Locale
 
-import android.app._
+import android.app.Service
 import android.content._
 import android.content.pm.{PackageInfo, PackageManager}
 import android.net.{ConnectivityManager, Network}
 import android.os._
-import android.support.v4.app.NotificationCompat
-import android.support.v4.content.ContextCompat
 import android.util.{Log, SparseArray}
 import android.widget.Toast
 import com.github.shadowsocks.aidl.Config
 import com.github.shadowsocks.utils._
 
-import scala.collection._
+import scala.collection.JavaConversions._
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
 
-class ShadowsocksNatService extends Service with BaseService {
+class ShadowsocksNatService extends BaseService {
 
   val TAG = "ShadowsocksNatService"
 
@@ -68,17 +65,15 @@ class ShadowsocksNatService extends Service with BaseService {
   val CMD_IPTABLES_DNAT_ADD_SOCKS = " -t nat -A OUTPUT -p tcp " +
     "-j DNAT --to-destination 127.0.0.1:8123"
 
-  var lockReceiver: BroadcastReceiver = null
-  var closeReceiver: BroadcastReceiver = null
-  var connReceiver: BroadcastReceiver = null
-  var config: Config = null
-  var apps: Array[ProxiedApp] = null
-  val myUid = Process.myUid()
+  private var notification: ShadowsocksNotification = _
+  var closeReceiver: BroadcastReceiver = _
+  var connReceiver: BroadcastReceiver = _
+  val myUid = android.os.Process.myUid()
 
-  var sslocalPid: Int = 0;
-  var sstunnelPid: Int = 0;
-  var redsocksPid: Int = 0;
-  var pdnsdPid: Int = 0;
+  var sslocalProcess: Process = _
+  var sstunnelProcess: Process = _
+  var redsocksProcess: Process = _
+  var pdnsdProcess: Process = _
 
   private val dnsAddressCache = new SparseArray[String]
 
@@ -148,7 +143,7 @@ class ShadowsocksNatService extends Service with BaseService {
       })
       Console.runRootCommand(cmdBuf.toArray)
     } else {
-      Console.runRootCommand(Array("ndc resolver flushdefaultif", "ndc resolver flushif wlan0"))
+      Console.runRootCommand("ndc resolver flushdefaultif", "ndc resolver flushif wlan0")
     }
   }
 
@@ -199,7 +194,10 @@ class ShadowsocksNatService extends Service with BaseService {
     }
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd.mkString(" "))
-    sslocalPid = System.exec(cmd.mkString(" "))
+    sslocalProcess = new ProcessBuilder()
+      .command(cmd)
+      .redirectErrorStream(true)
+      .start()
   }
 
   def startTunnel() {
@@ -224,7 +222,10 @@ class ShadowsocksNatService extends Service with BaseService {
 
       if (BuildConfig.DEBUG) Log.d(TAG, cmd.mkString(" "))
 
-     sstunnelPid =  System.exec(cmd.mkString(" "))
+      sstunnelProcess = new ProcessBuilder()
+        .command(cmd)
+        .redirectErrorStream(true)
+        .start()
 
     } else {
       val conf = ConfigUtils
@@ -246,7 +247,10 @@ class ShadowsocksNatService extends Service with BaseService {
 
       if (BuildConfig.DEBUG) Log.d(TAG, cmdBuf.mkString(" "))
 
-      sstunnelPid = System.exec(cmdBuf.mkString(" "))
+      sstunnelProcess = new ProcessBuilder()
+        .command(cmdBuf)
+        .redirectErrorStream(true)
+        .start()
     }
   }
 
@@ -269,8 +273,10 @@ class ShadowsocksNatService extends Service with BaseService {
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd)
 
-    pdnsdPid = System.exec(cmd)
-
+    pdnsdProcess = new ProcessBuilder()
+      .command(cmd.split(" ").toSeq)
+      .redirectErrorStream(true)
+      .start()
   }
 
   def getVersionName: String = {
@@ -294,7 +300,10 @@ class ShadowsocksNatService extends Service with BaseService {
     })
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd)
-    redsocksPid = System.exec(cmd)
+    redsocksProcess = new ProcessBuilder()
+      .command(cmd.split(" ").toSeq)
+      .redirectErrorStream(true)
+      .start()
   }
 
   /** Called when the activity is first created. */
@@ -307,33 +316,6 @@ class ShadowsocksNatService extends Service with BaseService {
     setupIptables()
 
     true
-  }
-
-  def notifyForegroundAlert(title: String, info: String, visible: Boolean) {
-    val openIntent = new Intent(this, classOf[Shadowsocks])
-    openIntent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-    val contentIntent = PendingIntent.getActivity(this, 0, openIntent, 0)
-    val closeIntent = new Intent(Action.CLOSE)
-    val actionIntent = PendingIntent.getBroadcast(this, 0, closeIntent, 0)
-    val builder = new NotificationCompat.Builder(this)
-
-    builder
-      .setWhen(0)
-      .setColor(ContextCompat.getColor(this, R.color.material_accent_500))
-      .setTicker(title)
-      .setContentTitle(getString(R.string.app_name))
-      .setContentText(info)
-      .setContentIntent(contentIntent)
-      .setSmallIcon(R.drawable.ic_stat_shadowsocks)
-      .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.stop),
-        actionIntent)
-
-    if (visible)
-      builder.setPriority(NotificationCompat.PRIORITY_DEFAULT)
-    else
-      builder.setPriority(NotificationCompat.PRIORITY_MIN)
-
-    startForeground(1, builder.build)
   }
 
   def onBind(intent: Intent): IBinder = {
@@ -350,26 +332,24 @@ class ShadowsocksNatService extends Service with BaseService {
     ConfigUtils.refresh(this)
   }
 
+  override def onStartCommand(intent: Intent, flags: Int, startId: Int): Int = Service.START_STICKY
+
   def killProcesses() {
-    try {
-      Process.killProcess(sslocalPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill ss-local")
+    if (sslocalProcess != null) {
+      sslocalProcess.destroy()
+      sslocalProcess = null
     }
-    try {
-      Process.killProcess(sstunnelPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill ss-tunnel")
+    if (sstunnelProcess != null) {
+      sstunnelProcess.destroy()
+      sstunnelProcess = null
     }
-    try {
-      Process.killProcess(redsocksPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill redsocks")
+    if (redsocksProcess != null) {
+      redsocksProcess.destroy()
+      redsocksProcess = null
     }
-    try {
-      Process.killProcess(pdnsdPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill pdnsd")
+    if (pdnsdProcess != null) {
+      pdnsdProcess.destroy()
+      pdnsdProcess = null
     }
 
     Console.runRootCommand(Utils.getIptables + " -t nat -F OUTPUT")
@@ -391,36 +371,33 @@ class ShadowsocksNatService extends Service with BaseService {
     init_sb.append(cmd_bypass.replace("-d 0.0.0.0", "--dport 53"))
 
     init_sb.append(Utils.getIptables
-      + " -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination 127.0.0.1:" + 8153)
+      + " -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination 127.0.0.1:8153")
 
     if (!config.isProxyApps || config.isBypassApps) {
       http_sb.append(Utils.getIptables + CMD_IPTABLES_DNAT_ADD_SOCKS)
     }
     if (config.isProxyApps) {
-      if (apps == null || apps.length <= 0) {
-        apps = AppManager.getProxiedApps(this, config.proxiedAppString)
-      }
-      val uidSet: mutable.HashSet[Int] = new mutable.HashSet[Int]
-      for (app <- apps) {
-        if (app.proxied) {
-          uidSet.add(app.uid)
-        }
-      }
-      for (uid <- uidSet) {
-        if (!config.isBypassApps) {
-          http_sb.append((Utils.getIptables + CMD_IPTABLES_DNAT_ADD_SOCKS).replace("-t nat", "-t nat -m owner --uid-owner " + uid))
-        } else {
-          init_sb.append(cmd_bypass.replace("-d 0.0.0.0", "-m owner --uid-owner " + uid))
-        }
+      val uidMap = getPackageManager.getInstalledApplications(0).map(ai => ai.packageName -> ai.uid).toMap
+      for (pn <- config.proxiedAppString.split('\n')) uidMap.get(pn) match {
+        case Some(uid) =>
+          if (!config.isBypassApps) {
+            http_sb.append((Utils.getIptables + CMD_IPTABLES_DNAT_ADD_SOCKS)
+              .replace("-t nat", "-t nat -m owner --uid-owner " + uid))
+          } else {
+            init_sb.append(cmd_bypass.replace("-d 0.0.0.0", "-m owner --uid-owner " + uid))
+          }
+        case _ => // probably removed package, ignore
       }
     }
-    Console.runRootCommand(init_sb.toArray)
-    Console.runRootCommand(http_sb.toArray)
+    Console.runRootCommand((init_sb ++ http_sb).toArray)
   }
 
-  override def startRunner(c: Config) {
-
-    config = c
+  override def startRunner(config: Config) {
+    if (!Console.isRoot) {
+      changeState(State.STOPPED, getString(R.string.nat_no_root))
+      return
+    }
+    super.startRunner(config)
 
     // register close receiver
     val filter = new IntentFilter()
@@ -432,49 +409,24 @@ class ShadowsocksNatService extends Service with BaseService {
     }
     registerReceiver(closeReceiver, filter)
 
-    if (Utils.isLollipopOrAbove) {
-      val screenFilter = new IntentFilter()
-      screenFilter.addAction(Intent.ACTION_SCREEN_ON)
-      screenFilter.addAction(Intent.ACTION_SCREEN_OFF)
-      screenFilter.addAction(Intent.ACTION_USER_PRESENT)
-      lockReceiver = (context: Context, intent: Intent) => if (getState == State.CONNECTED) {
-        val action = intent.getAction
-        if (action == Intent.ACTION_SCREEN_OFF) {
-          notifyForegroundAlert(getString(R.string.forward_success),
-            getString(R.string.service_running).formatLocal(Locale.ENGLISH, config.profileName), false)
-        } else if (action == Intent.ACTION_SCREEN_ON) {
-          val keyGuard = getSystemService(Context.KEYGUARD_SERVICE).asInstanceOf[KeyguardManager]
-          if (!keyGuard.inKeyguardRestrictedInputMode) {
-            notifyForegroundAlert(getString(R.string.forward_success),
-              getString(R.string.service_running).formatLocal(Locale.ENGLISH, config.profileName), true)
-          }
-        } else if (action == Intent.ACTION_USER_PRESENT) {
-          notifyForegroundAlert(getString(R.string.forward_success),
-            getString(R.string.service_running).formatLocal(Locale.ENGLISH, config.profileName), true)
-        }
-      }
-        registerReceiver(lockReceiver, screenFilter)
-    }
-
     ShadowsocksApplication.track(TAG, "start")
-
+    
     changeState(State.CONNECTING)
 
-    Future {
-
+    ThrowableFuture {
       if (config.proxy == "198.199.101.152") {
         val holder = ShadowsocksApplication.containerHolder
         try {
-          config = ConfigUtils.getPublicConfig(getBaseContext, holder.getContainer, config)
+          this.config = ConfigUtils.getPublicConfig(getBaseContext, holder.getContainer, config)
         } catch {
           case ex: Exception =>
             changeState(State.STOPPED, getString(R.string.service_failed))
             stopRunner()
-            config = null
+            this.config = null
         }
       }
 
-      if (config != null) {
+      if (this.config != null) {
 
         // Clean up
         killProcesses()
@@ -496,9 +448,8 @@ class ShadowsocksNatService extends Service with BaseService {
           // Set DNS
           flushDns()
 
-          notifyForegroundAlert(getString(R.string.forward_success),
-            getString(R.string.service_running).formatLocal(Locale.ENGLISH, config.profileName), true)
           changeState(State.CONNECTED)
+          notification = new ShadowsocksNotification(this, config.profileName, true)
         } else {
           changeState(State.STOPPED, getString(R.string.service_failed))
           stopRunner()
@@ -518,31 +469,14 @@ class ShadowsocksNatService extends Service with BaseService {
       closeReceiver = null
     }
 
-    if (Utils.isLollipopOrAbove) {
-      if (lockReceiver != null) {
-        unregisterReceiver(lockReceiver)
-        lockReceiver = null
-      }
-    }
+    if (notification != null) notification.destroy()
 
     ShadowsocksApplication.track(TAG, "stop")
 
     // reset NAT
     killProcesses()
 
-    // stop the service if no callback registered
-    if (getCallbackCount == 0) {
-      stopSelf()
-    }
-
-    stopForeground(true)
-
-    // change the state
-    changeState(State.STOPPED)
-  }
-
-  override def stopBackgroundService() {
-    stopSelf()
+    super.stopRunner()
   }
 
   override def getTag = TAG

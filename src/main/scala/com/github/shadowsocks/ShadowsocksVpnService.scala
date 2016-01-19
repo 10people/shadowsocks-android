@@ -40,41 +40,38 @@
 package com.github.shadowsocks
 
 import java.io.File
+import java.lang.Process
 import java.util.Locale
 
-import android.app._
 import android.content._
 import android.content.pm.{PackageInfo, PackageManager}
 import android.net.VpnService
 import android.os._
-import android.support.v4.app.NotificationCompat
-import android.support.v4.content.ContextCompat
 import android.util.Log
 import android.widget.Toast
+import android.content.pm.PackageManager.NameNotFoundException
+
 import com.github.shadowsocks.aidl.Config
 import com.github.shadowsocks.utils._
 import org.apache.commons.net.util.SubnetUtils
 
-import scala.collection.mutable
+import scala.collection.JavaConversions._
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
 
 class ShadowsocksVpnService extends VpnService with BaseService {
   val TAG = "ShadowsocksVpnService"
   val VPN_MTU = 1500
   val PRIVATE_VLAN = "26.26.26.%s"
   val PRIVATE_VLAN6 = "fdfe:dcba:9876::%s"
-  var conn: ParcelFileDescriptor = null
-  var apps: Array[ProxiedApp] = null
-  var config: Config = null
-  var vpnThread: ShadowsocksVpnThread = null
-  var closeReceiver: BroadcastReceiver = null
+  var conn: ParcelFileDescriptor = _
+  var vpnThread: ShadowsocksVpnThread = _
+  private var notification: ShadowsocksNotification = _
+  var closeReceiver: BroadcastReceiver = _
 
-  var sslocalPid: Int = 0;
-  var sstunnelPid: Int = 0;
-  var tun2socksPid: Int = 0;
-  var pdnsdPid: Int = 0;
+  var sslocalProcess: Process = _
+  var sstunnelProcess: Process = _
+  var pdnsdProcess: Process = _
+  var tun2socksProcess: Process = _
 
   def isByass(net: SubnetUtils): Boolean = {
     val info = net.getInfo
@@ -107,32 +104,6 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     null
   }
 
-  def notifyForegroundAlert(title: String, info: String, visible: Boolean) {
-    val openIntent = new Intent(this, classOf[Shadowsocks])
-    val contentIntent = PendingIntent.getActivity(this, 0, openIntent, 0)
-    val closeIntent = new Intent(Action.CLOSE)
-    val actionIntent = PendingIntent.getBroadcast(this, 0, closeIntent, 0)
-    val builder = new NotificationCompat.Builder(this)
-
-    builder
-      .setWhen(0)
-      .setColor(ContextCompat.getColor(this, R.color.material_accent_500))
-      .setTicker(title)
-      .setContentTitle(getString(R.string.app_name))
-      .setContentText(info)
-      .setContentIntent(contentIntent)
-      .setSmallIcon(R.drawable.ic_stat_shadowsocks)
-      .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.stop),
-        actionIntent)
-
-    if (visible)
-      builder.setPriority(NotificationCompat.PRIORITY_DEFAULT)
-    else
-      builder.setPriority(NotificationCompat.PRIORITY_MIN)
-
-    startForeground(1, builder.build)
-  }
-
   override def onCreate() {
     super.onCreate()
     ConfigUtils.refresh(this)
@@ -149,7 +120,7 @@ class ShadowsocksVpnService extends VpnService with BaseService {
       vpnThread = null
     }
 
-    stopForeground(true)
+    if (notification != null) notification.destroy()
 
     // channge the state
     changeState(State.STOPPING)
@@ -165,19 +136,13 @@ class ShadowsocksVpnService extends VpnService with BaseService {
       conn = null
     }
 
-    // stop the service if no callback registered
-    if (getCallbackCount == 0) {
-      stopSelf()
-    }
-
     // clean up recevier
     if (closeReceiver != null) {
       unregisterReceiver(closeReceiver)
       closeReceiver = null
     }
 
-    // channge the state
-    changeState(State.STOPPED)
+    super.stopRunner()
   }
 
   def getVersionName: String = {
@@ -193,34 +158,30 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   }
 
   def killProcesses() {
-    try {
-      Process.killProcess(sslocalPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill ss-local")
+    if (sslocalProcess != null) {
+      sslocalProcess.destroy()
+      sslocalProcess = null
     }
-    try {
-      Process.killProcess(sstunnelPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill ss-tunnel")
+    if (sstunnelProcess != null) {
+      sstunnelProcess.destroy()
+      sstunnelProcess = null
     }
-    try {
-      Process.killProcess(tun2socksPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill tun2socks")
+    if (tun2socksProcess != null) {
+      tun2socksProcess.destroy()
+      tun2socksProcess = null
     }
-    try {
-      Process.killProcess(pdnsdPid)
-    } catch {
-      case e: Throwable => Log.e(TAG, "unable to kill pdnsd")
+    if (pdnsdProcess != null) {
+      pdnsdProcess.destroy()
+      pdnsdProcess = null
     }
   }
 
-  override def startRunner(c: Config) {
+  override def startRunner(config: Config) {
+
+    super.startRunner(config)
 
     vpnThread = new ShadowsocksVpnThread(this)
     vpnThread.start()
-
-    config = c
 
     // register close receiver
     val filter = new IntentFilter()
@@ -244,16 +205,16 @@ class ShadowsocksVpnService extends VpnService with BaseService {
 
     changeState(State.CONNECTING)
 
-    Future {
+    ThrowableFuture {
       if (config.proxy == "198.199.101.152") {
         val holder = ShadowsocksApplication.containerHolder
         try {
-          config = ConfigUtils.getPublicConfig(getBaseContext, holder.getContainer, config)
+          this.config = ConfigUtils.getPublicConfig(getBaseContext, holder.getContainer, config)
         } catch {
           case ex: Exception =>
             changeState(State.STOPPED, getString(R.string.service_failed))
             stopRunner()
-            config = null
+            this.config = null
         }
       }
 
@@ -276,9 +237,8 @@ class ShadowsocksVpnService extends VpnService with BaseService {
         }
 
         if (resolved && handleConnection) {
-          notifyForegroundAlert(getString(R.string.forward_success),
-            getString(R.string.service_running).formatLocal(Locale.ENGLISH, config.profileName), false)
           changeState(State.CONNECTED)
+          notification = new ShadowsocksNotification(this, config.profileName)
         } else {
           changeState(State.STOPPED, getString(R.string.service_failed))
           stopRunner()
@@ -343,7 +303,11 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     }
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd.mkString(" "))
-    sslocalPid = System.exec(cmd.mkString(" "))
+
+    sslocalProcess = new ProcessBuilder()
+      .command(cmd)
+      .redirectErrorStream(true)
+      .start()
   }
 
   def startDnsTunnel() = {
@@ -366,7 +330,11 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     if (config.isAuth) cmd += "-A"
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd.mkString(" "))
-    sstunnelPid = System.exec(cmd.mkString(" "))
+
+    sstunnelProcess = new ProcessBuilder()
+      .command(cmd)
+      .redirectErrorStream(true)
+      .start()
   }
 
   def startDnsDaemon() {
@@ -388,7 +356,11 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     val cmd = Path.BASE + "pdnsd -c " + Path.BASE + "pdnsd-vpn.conf"
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd)
-    pdnsdPid = System.exec(cmd)
+
+    pdnsdProcess = new ProcessBuilder()
+      .command(cmd.split(" ").toSeq)
+      .redirectErrorStream(true)
+      .start()
   }
 
   override def getContext = getBaseContext
@@ -410,18 +382,16 @@ class ShadowsocksVpnService extends VpnService with BaseService {
     if (Utils.isLollipopOrAbove) {
 
       if (config.isProxyApps) {
-        val apps = AppManager.getProxiedApps(this, config.proxiedAppString)
-        val pkgSet: mutable.HashSet[String] = new mutable.HashSet[String]
-        for (app <- apps) {
-          if (app.proxied) {
-            pkgSet.add(app.packageName)
-          }
-        }
-        for (pkg <- pkgSet) {
-          if (!config.isBypassApps) {
-            builder.addAllowedApplication(pkg)
-          } else {
-            builder.addDisallowedApplication(pkg)
+        for (pkg <- config.proxiedAppString.split('\n')) {
+          try {
+            if (!config.isBypassApps) {
+              builder.addAllowedApplication(pkg)
+            } else {
+              builder.addDisallowedApplication(pkg)
+            }
+          } catch {
+            case ex: NameNotFoundException =>
+              Log.e(TAG, "Invalid package name", ex);
           }
         }
       }
@@ -441,11 +411,14 @@ class ShadowsocksVpnService extends VpnService with BaseService {
 
     try {
       conn = builder.establish()
+      if (conn == null) changeState(State.STOPPED, getString(R.string.reboot_required))
     } catch {
       case ex: IllegalStateException =>
         changeState(State.STOPPED, ex.getMessage)
         conn = null
-      case ex: Exception => conn = null
+      case ex: Exception =>
+        ex.printStackTrace()
+        conn = null
     }
 
     if (conn == null) {
@@ -461,10 +434,10 @@ class ShadowsocksVpnService extends VpnService with BaseService {
       + "--socks-server-addr 127.0.0.1:%d "
       + "--tunfd %d "
       + "--tunmtu %d "
-      + "--loglevel 3 ")
+      + "--loglevel 3")
       .formatLocal(Locale.ENGLISH,
         PRIVATE_VLAN.formatLocal(Locale.ENGLISH, "2"),
-        config.localPort, fd, VPN_MTU, Path.BASE)
+        config.localPort, fd, VPN_MTU)
 
     if (config.isIpv6)
       cmd += " --netif-ip6addr " + PRIVATE_VLAN6.formatLocal(Locale.ENGLISH, "2")
@@ -476,13 +449,12 @@ class ShadowsocksVpnService extends VpnService with BaseService {
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd)
 
-    tun2socksPid = System.exec(cmd)
+    tun2socksProcess = new ProcessBuilder()
+      .command(cmd.split(" ").toSeq)
+      .redirectErrorStream(true)
+      .start()
 
     fd
-  }
-
-  override def stopBackgroundService() {
-    stopSelf()
   }
 
   override def getTag = TAG

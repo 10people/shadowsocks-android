@@ -1,12 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="com.github.shadowsocks"
-          android:versionCode="121"
-          android:versionName="2.8.4">
+          android:versionCode="128"
+          android:versionName="2.9.6">
 
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-    <uses-permission android:name="android.permission.ACCESS_SUPERUSER"/>
 
     <uses-feature
             android:name="android.hardware.touchscreen"
@@ -80,6 +79,13 @@
                 android:parentActivityName=".Shadowsocks"
                 android:launchMode="singleTask"/>
 
+        <activity android:name=".TaskerActivity"
+                  android:icon="@drawable/ic_launcher">
+            <intent-filter>
+                <action android:name="com.twofortyfouram.locale.intent.action.EDIT_SETTING" />
+            </intent-filter>
+        </activity>
+
         <service
                 android:name=".ShadowsocksRunnerService"
                 android:exported="false">
@@ -109,6 +115,11 @@
             </intent-filter>
         </receiver>
 
+        <receiver android:name=".TaskerReceiver">
+            <intent-filter>
+                <action android:name="com.twofortyfouram.locale.intent.action.FIRE_SETTING"/>
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

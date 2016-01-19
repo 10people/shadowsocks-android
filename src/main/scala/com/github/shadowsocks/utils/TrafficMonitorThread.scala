@@ -37,26 +37,22 @@
  *
  */
 
-package com.github.shadowsocks
+package com.github.shadowsocks.utils
 
-import java.io.{File, FileDescriptor, IOException}
+import java.io.{File, IOException}
+import java.nio.{ByteBuffer, ByteOrder}
 import java.util.concurrent.Executors
 
 import android.net.{LocalServerSocket, LocalSocket, LocalSocketAddress}
 import android.util.Log
 
-object ShadowsocksVpnThread {
-  val getInt = classOf[FileDescriptor].getDeclaredMethod("getInt$")
-}
+class TrafficMonitorThread() extends Thread {
 
-class ShadowsocksVpnThread(vpnService: ShadowsocksVpnService) extends Thread {
-  import ShadowsocksVpnThread._
+  val TAG = "TrafficMonitorThread"
+  val PATH = "/data/data/com.github.shadowsocks/stat_path"
 
-  val TAG = "ShadowsocksVpnService"
-  val PATH = "/data/data/com.github.shadowsocks/protect_path"
-
-  @volatile var isRunning: Boolean = true
   @volatile var serverSocket: LocalServerSocket = null
+  @volatile var isRunning: Boolean = true
 
   def closeServerSocket() {
     if (serverSocket != null) {
@@ -92,7 +88,7 @@ class ShadowsocksVpnThread(vpnService: ShadowsocksVpnService) extends Thread {
         return
     }
 
-    val pool = Executors.newFixedThreadPool(4)
+    val pool = Executors.newFixedThreadPool(1)
 
     while (isRunning) {
       try {
@@ -103,30 +99,19 @@ class ShadowsocksVpnThread(vpnService: ShadowsocksVpnService) extends Thread {
             val input = socket.getInputStream
             val output = socket.getOutputStream
 
-            input.read()
+            val buffer = new Array[Byte](16)
+            if (input.read(buffer) != 16) throw new IOException("Unexpected traffic stat length")
+            val stat = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
+            TrafficMonitor.update(stat.getLong(0), stat.getLong(8))
 
-            val fds = socket.getAncillaryFileDescriptors
-
-            if (fds.nonEmpty) {
-              val fd = getInt.invoke(fds(0)).asInstanceOf[Int]
-              val ret = vpnService.protect(fd)
-
-              // Trick to close file decriptor
-              System.jniclose(fd)
-
-              if (ret) {
-                output.write(0)
-              } else {
-                output.write(1)
-              }
-            }
+            output.write(0)
 
             input.close()
             output.close()
 
           } catch {
             case e: Exception =>
-              Log.e(TAG, "Error when protect socket", e)
+              Log.e(TAG, "Error when recv traffic stat", e)
           }
 
           // close socket

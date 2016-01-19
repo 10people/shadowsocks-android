@@ -36,66 +36,25 @@
  *                              HERE BE DRAGONS
  *
  */
+package com.github.shadowsocks
 
-package com.github.shadowsocks.utils
+import android.content.{BroadcastReceiver, Context, Intent}
+import com.github.shadowsocks.helper.TaskerSettings
+import com.github.shadowsocks.utils.Utils
 
-import java.util
-
-import eu.chainfire.libsuperuser.Shell
-import eu.chainfire.libsuperuser.Shell.{Builder, SU}
-
-object Console {
-
-  private def openShell(): Shell.Interactive = {
-    val builder = new Builder()
-    builder
-      .useSH()
-      .setWatchdogTimeout(10)
-      .open()
-  }
-
-  private def openRootShell(context: String): Shell.Interactive = {
-    val builder = new Builder()
-    builder
-      .setShell(SU.shell(0, context))
-      .setWantSTDERR(true)
-      .setWatchdogTimeout(10)
-      .open()
-  }
-
-  def runCommand(command: String) {
-    runCommand(Array(command))
-  }
-
-  def runCommand(commands: Array[String]) {
-    val shell = openShell()
-    shell.addCommand(commands, 0, ((commandCode: Int, exitCode: Int, output: util.List[String]) =>
-      if (exitCode < 0) shell.close()): Shell.OnCommandResultListener)
-    shell.waitForIdle()
-    shell.close()
-  }
-
-  def runRootCommand(commands: String*): String = runRootCommand(commands.toArray)
-  def runRootCommand(commands: Array[String]): String = {
-    val shell = openRootShell("u:r:init_shell:s0")
-    val sb = new StringBuilder
-    shell.addCommand(commands, 0, ((_, exitCode, output) => {
-      if (exitCode < 0) {
-        shell.close()
-      } else {
-        import scala.collection.JavaConversions._
-        output.foreach(line => sb.append(line).append('\n'))
-      }
-    }): Shell.OnCommandResultListener)
-    if (shell.waitForIdle()) {
-      shell.close()
-      sb.toString()
+/**
+  * @author CzBiX
+  */
+class TaskerReceiver extends BroadcastReceiver {
+  override def onReceive(context: Context, intent: Intent) {
+    val settings = TaskerSettings.fromIntent(intent)
+    val switched = ShadowsocksApplication.profileManager.getProfile(settings.profileId) match {
+      case Some(p) =>
+        Utils.stopSsService(context)
+        ShadowsocksApplication.switchProfile(settings.profileId)
+        true
+      case _ => false
     }
-    else {
-      shell.close()
-      null
-    }
+    if (settings.switchOn) Utils.startSsService(context) else if (!switched) Utils.stopSsService(context)
   }
-
-  def isRoot: Boolean = SU.available()
 }
