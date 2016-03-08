@@ -44,7 +44,6 @@ import java.lang.Process
 import java.net.{Inet6Address, InetAddress}
 import java.util.Locale
 
-import android.app.Service
 import android.content._
 import android.content.pm.{PackageInfo, PackageManager}
 import android.net.{ConnectivityManager, Network}
@@ -164,40 +163,40 @@ class ShadowsocksNatService extends BaseService {
 
   def startShadowsocksDaemon() {
     if (config.route != Route.ALL) {
-      val acl: Array[String] = config.route match {
-        case Route.BYPASS_LAN => getResources.getStringArray(R.array.private_route)
-        case Route.BYPASS_CHN => getResources.getStringArray(R.array.chn_route_full)
+      val acl: Array[Array[String]] = config.route match {
+        case Route.BYPASS_LAN => Array(getResources.getStringArray(R.array.private_route))
+        case Route.BYPASS_CHN => Array(getResources.getStringArray(R.array.chn_route))
+        case Route.BYPASS_LAN_CHN =>
+          Array(getResources.getStringArray(R.array.private_route), getResources.getStringArray(R.array.chn_route))
       }
-      ConfigUtils.printToFile(new File(Path.BASE + "acl.list"))(p => {
-        acl.foreach(item => p.println(item))
+      ConfigUtils.printToFile(new File(getApplicationInfo.dataDir + "/acl.list"))(p => {
+        acl.flatten.foreach(p.println)
       })
     }
 
     val conf = ConfigUtils
       .SHADOWSOCKS.formatLocal(Locale.ENGLISH, config.proxy, config.remotePort, config.localPort,
         config.sitekey, config.encMethod, 600)
-    ConfigUtils.printToFile(new File(Path.BASE + "ss-local-nat.conf"))(p => {
+    ConfigUtils.printToFile(new File(getApplicationInfo.dataDir + "/ss-local-nat.conf"))(p => {
       p.println(conf)
     })
 
     val cmd = new ArrayBuffer[String]
-    cmd += (Path.BASE + "ss-local"
+    cmd += (getApplicationInfo.dataDir + "/ss-local"
           , "-b" , "127.0.0.1"
           , "-t" , "600"
-          , "-c" , Path.BASE + "ss-local-nat.conf")
+          , "-P", getApplicationInfo.dataDir
+          , "-c" , getApplicationInfo.dataDir + "/ss-local-nat.conf")
 
     if (config.isAuth) cmd += "-A"
 
     if (config.route != Route.ALL) {
       cmd += "--acl"
-      cmd += (Path.BASE + "acl.list")
+      cmd += (getApplicationInfo.dataDir + "/acl.list")
     }
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd.mkString(" "))
-    sslocalProcess = new ProcessBuilder()
-      .command(cmd)
-      .redirectErrorStream(true)
-      .start()
+    sslocalProcess = new GuardedProcess(cmd).start()
   }
 
   def startTunnel() {
@@ -205,16 +204,17 @@ class ShadowsocksNatService extends BaseService {
       val conf = ConfigUtils
         .SHADOWSOCKS.formatLocal(Locale.ENGLISH, config.proxy, config.remotePort, 8153,
           config.sitekey, config.encMethod, 10)
-      ConfigUtils.printToFile(new File(Path.BASE + "ss-tunnel-nat.conf"))(p => {
+      ConfigUtils.printToFile(new File(getApplicationInfo.dataDir + "/ss-tunnel-nat.conf"))(p => {
         p.println(conf)
       })
       val cmd = new ArrayBuffer[String]
-      cmd += (Path.BASE + "ss-tunnel"
+      cmd += (getApplicationInfo.dataDir + "/ss-tunnel"
         , "-u"
         , "-t" , "10"
         , "-b" , "127.0.0.1"
         , "-L" , "8.8.8.8:53"
-        , "-c" , Path.BASE + "ss-tunnel-nat.conf")
+        , "-P" , getApplicationInfo.dataDir
+        , "-c" , getApplicationInfo.dataDir + "/ss-tunnel-nat.conf")
 
       cmd += ("-l" , "8153")
 
@@ -222,61 +222,53 @@ class ShadowsocksNatService extends BaseService {
 
       if (BuildConfig.DEBUG) Log.d(TAG, cmd.mkString(" "))
 
-      sstunnelProcess = new ProcessBuilder()
-        .command(cmd)
-        .redirectErrorStream(true)
-        .start()
+      sstunnelProcess = new GuardedProcess(cmd).start()
 
     } else {
       val conf = ConfigUtils
         .SHADOWSOCKS.formatLocal(Locale.ENGLISH, config.proxy, config.remotePort, 8163,
           config.sitekey, config.encMethod, 10)
-      ConfigUtils.printToFile(new File(Path.BASE + "ss-tunnel-nat.conf"))(p => {
+      ConfigUtils.printToFile(new File(getApplicationInfo.dataDir + "/ss-tunnel-nat.conf"))(p => {
         p.println(conf)
       })
       val cmdBuf = new ArrayBuffer[String]
-      cmdBuf += (Path.BASE + "ss-tunnel"
+      cmdBuf += (getApplicationInfo.dataDir + "/ss-tunnel"
         , "-u"
         , "-t" , "10"
         , "-b" , "127.0.0.1"
         , "-l" , "8163"
         , "-L" , "8.8.8.8:53"
-        , "-c" , Path.BASE + "ss-tunnel-nat.conf")
+        , "-P", getApplicationInfo.dataDir
+        , "-c" , getApplicationInfo.dataDir + "/ss-tunnel-nat.conf")
 
       if (config.isAuth) cmdBuf += "-A"
 
       if (BuildConfig.DEBUG) Log.d(TAG, cmdBuf.mkString(" "))
 
-      sstunnelProcess = new ProcessBuilder()
-        .command(cmdBuf)
-        .redirectErrorStream(true)
-        .start()
+      sstunnelProcess = new GuardedProcess(cmdBuf).start()
     }
   }
 
   def startDnsDaemon() {
 
-    val conf = if (config.route == Route.BYPASS_CHN) {
+    val conf = if (config.route == Route.BYPASS_CHN || config.route == Route.BYPASS_LAN_CHN) {
       val reject = ConfigUtils.getRejectList(getContext)
       val blackList = ConfigUtils.getBlackList(getContext)
-      ConfigUtils.PDNSD_DIRECT.formatLocal(Locale.ENGLISH, "127.0.0.1", 8153,
-        reject, blackList, 8163, "")
+      ConfigUtils.PDNSD_DIRECT.formatLocal(Locale.ENGLISH, getApplicationInfo.dataDir,
+        "127.0.0.1", 8153, reject, blackList, 8163, "")
     } else {
-      ConfigUtils.PDNSD_LOCAL.formatLocal(Locale.ENGLISH, "127.0.0.1", 8153,
-        8163, "")
+      ConfigUtils.PDNSD_LOCAL.formatLocal(Locale.ENGLISH, getApplicationInfo.dataDir,
+        "127.0.0.1", 8153, 8163, "")
     }
 
-    ConfigUtils.printToFile(new File(Path.BASE + "pdnsd-nat.conf"))(p => {
+    ConfigUtils.printToFile(new File(getApplicationInfo.dataDir + "/pdnsd-nat.conf"))(p => {
        p.println(conf)
     })
-    val cmd = Path.BASE + "pdnsd -c " + Path.BASE + "pdnsd-nat.conf"
+    val cmd = getApplicationInfo.dataDir + "/pdnsd -c " + getApplicationInfo.dataDir + "/pdnsd-nat.conf"
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd)
 
-    pdnsdProcess = new ProcessBuilder()
-      .command(cmd.split(" ").toSeq)
-      .redirectErrorStream(true)
-      .start()
+    pdnsdProcess = new GuardedProcess(cmd.split(" ").toSeq).start()
   }
 
   def getVersionName: String = {
@@ -293,17 +285,14 @@ class ShadowsocksNatService extends BaseService {
 
   def startRedsocksDaemon() {
     val conf = ConfigUtils.REDSOCKS.formatLocal(Locale.ENGLISH, config.localPort)
-    val cmd = Path.BASE + "redsocks -c %sredsocks-nat.conf"
-      .formatLocal(Locale.ENGLISH, Path.BASE, Path.BASE)
-    ConfigUtils.printToFile(new File(Path.BASE + "redsocks-nat.conf"))(p => {
+    val cmd = "%s/redsocks -c %s/redsocks-nat.conf"
+      .formatLocal(Locale.ENGLISH, getApplicationInfo.dataDir, getApplicationInfo.dataDir)
+    ConfigUtils.printToFile(new File(getApplicationInfo.dataDir + "/redsocks-nat.conf"))(p => {
       p.println(conf)
     })
 
     if (BuildConfig.DEBUG) Log.d(TAG, cmd)
-    redsocksProcess = new ProcessBuilder()
-      .command(cmd.split(" ").toSeq)
-      .redirectErrorStream(true)
-      .start()
+    redsocksProcess = new GuardedProcess(cmd.split(" ").toSeq).start()
   }
 
   /** Called when the activity is first created. */
@@ -331,8 +320,6 @@ class ShadowsocksNatService extends BaseService {
     super.onCreate()
     ConfigUtils.refresh(this)
   }
-
-  override def onStartCommand(intent: Intent, flags: Int, startId: Int): Int = Service.START_STICKY
 
   def killProcesses() {
     if (sslocalProcess != null) {
