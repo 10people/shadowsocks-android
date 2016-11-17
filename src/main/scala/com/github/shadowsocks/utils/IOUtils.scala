@@ -1,33 +1,31 @@
 package com.github.shadowsocks.utils
 
-import android.util.Log
+import com.github.shadowsocks.utils.CloseUtils._
+import java.io.{FileWriter, InputStream, OutputStream}
 
 /**
-  * @author chentaov5@gmail.com
+  * @author Mygod
   */
 object IOUtils {
+  private final val BUFFER_SIZE = 32 * 1024
 
-  val TAG = "IOUtils"
-
-  def autoClose[R <: {def close() : Unit}, T](in: R)(fun: => T): T = {
-    try {
-      fun
-    } finally if (in ne null)
-      try {
-        in.close()
-      } catch {
-        case e: Exception => Log.d(TAG, e.getMessage, e)
-      }
-  }
-
-  def inSafe[T](fun: => T): Option[T] = {
-    var res: Option[T] = None
-    try {
-      res = Some(fun)
-    } catch {
-      case e: Exception => Log.d(TAG, e.getMessage, e)
+  def copy(in: InputStream, out: OutputStream) {
+    val buffer = new Array[Byte](BUFFER_SIZE)
+    while (true) {
+      val count = in.read(buffer)
+      if (count >= 0) out.write(buffer, 0, count) else return
     }
-    res
   }
 
+  def readString(in: InputStream): String = {
+    val builder = new StringBuilder()
+    val buffer = new Array[Byte](BUFFER_SIZE)
+    while (true) {
+      val count = in.read(buffer)
+      if (count >= 0) builder.append(new String(buffer, 0, count)) else return builder.toString()
+    }
+    null
+  }
+
+  def writeString(file: String, content: String) = autoClose(new FileWriter(file))(writer => writer.write(content))
 }

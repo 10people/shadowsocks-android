@@ -1,50 +1,59 @@
-import android.Keys._
+scalaVersion := "2.11.8"
+dexMaxHeap := "4g"
 
-android.Plugin.androidBuild
-
-platformTarget in Android := "android-23"
+enablePlugins(AndroidApp)
+android.useSupportVectors
 
 name := "shadowsocks"
+version := "3.2.7"
+versionCode := Some(167)
 
-scalaVersion := "2.11.7"
+platformTarget := "android-25"
 
-compileOrder in Compile := CompileOrder.JavaThenScala
+compileOrder := CompileOrder.JavaThenScala
+javacOptions ++= "-source" :: "1.7" :: "-target" :: "1.7" :: Nil
+scalacOptions ++= "-target:jvm-1.7" :: "-Xexperimental" :: Nil
+ndkJavah := Seq()
+ndkBuild := Seq()
 
-javacOptions ++= Seq("-source", "1.6", "-target", "1.6")
+proguardVersion := "5.3.1"
+proguardCache := Seq()
+proguardOptions ++=
+  "-keep class com.github.shadowsocks.System { *; }" ::
+  "-dontwarn com.google.android.gms.internal.**" ::
+  "-dontwarn com.j256.ormlite.**" ::
+  "-dontwarn org.xbill.**" ::
+  Nil
 
-scalacOptions ++= Seq("-target:jvm-1.6", "-Xexperimental")
-
-ndkJavah in Android := List()
-
-ndkBuild in Android := List()
-
-shrinkResources in Android := true
-
-typedResources in Android := false
+shrinkResources := true
+typedResources := false
+resConfigs := Seq("ru", "zh-rCN", "zh-rTW")
 
 resolvers += Resolver.jcenterRepo
+libraryDependencies ++=
+  "com.android.support" % "design" % "25.0.0" ::
+  "com.android.support" % "gridlayout-v7" % "25.0.0" ::
+  "com.android.support" % "preference-v14" % "25.0.0" ::
+  "com.evernote" % "android-job" % "1.1.3" ::
+  "com.github.clans" % "fab" % "1.6.4" ::
+  "com.github.jorgecastilloprz" % "fabprogresscircle" % "1.01" ::
+  "com.github.kevinsawicki" % "http-request" % "6.0" ::
+  "com.google.android.gms" % "play-services-ads" % "9.8.0" ::
+  "com.google.android.gms" % "play-services-analytics" % "9.8.0" ::
+  "com.google.android.gms" % "play-services-gcm" % "9.8.0" ::
+  "com.j256.ormlite" % "ormlite-android" % "5.0" ::
+  "com.twofortyfouram" % "android-plugin-api-for-locale" % "1.0.2" ::
+  "dnsjava" % "dnsjava" % "2.1.7" ::
+  "eu.chainfire" % "libsuperuser" % "1.0.0.201608240809" ::
+  "me.dm7.barcodescanner" % "zxing" % "1.9" ::
+  "net.glxn.qrgen" % "android" % "2.0" ::
+  Nil
 
-resolvers += "JRAF" at "http://JRAF.org/static/maven/2"
-
-libraryDependencies ++= Seq(
-  "dnsjava" % "dnsjava" % "2.1.7",
-  "com.github.kevinsawicki" % "http-request" % "6.0",
-  "commons-net" % "commons-net" % "3.4",
-  "eu.chainfire" % "libsuperuser" % "1.0.0.201602011018",
-  "com.google.zxing" % "android-integration" % "3.2.1",
-  "net.glxn.qrgen" % "android" % "2.0",
-  "com.google.android.gms" % "play-services-base" % "8.4.0",
-  "com.google.android.gms" % "play-services-ads" % "8.4.0",
-  "com.google.android.gms" % "play-services-analytics" % "8.4.0",
-  "com.android.support" % "design" % "23.1.1",
-  "com.android.support" % "gridlayout-v7" % "23.1.1",
-  "com.github.jorgecastilloprz" % "fabprogresscircle" % "1.01",
-  "com.j256.ormlite" % "ormlite-core" % "4.48",
-  "com.j256.ormlite" % "ormlite-android" % "4.48",
-  "com.twofortyfouram" % "android-plugin-api-for-locale" % "1.0.2"
-)
-
-proguardOptions in Android ++= Seq("-keep class com.github.shadowsocks.** { <init>(...); }",
-          "-keep class com.github.shadowsocks.System { *; }",
-          "-keepattributes *Annotation*",
-          "-dontwarn org.xbill.**")
+lazy val nativeBuild = TaskKey[Unit]("native-build", "Build native executables")
+nativeBuild := {
+  val logger = streams.value.log
+  Process("./build.sh") ! logger match {
+    case 0 => // Success!
+    case n => sys.error(s"Native build script exit code: $n")
+  }
+}
